@@ -228,3 +228,22 @@ def test_missing_timestamp_is_allowed_when_not_required():
 
     assert result.valid is True
     assert result.reasons == []
+
+def test_invalid_timestamp_format_is_invalid():
+    telemetry = {
+        "timestamp": "not-a-timestamp",
+        "tyre_temperature": 96.5,
+    }
+
+    result = validate_telemetry(
+        telemetry=telemetry,
+        required_fields=["tyre_temperature"],
+        field_types={
+            "timestamp": str,
+            "tyre_temperature": float,
+        },
+        max_age_seconds=10,
+    )
+
+    assert result.valid is False
+    assert "Timestamp has invalid format" in result.reasons
