@@ -1,8 +1,7 @@
 from typing import Any
 
-from datahub_client import get_downstream_entities, make_urn
-from incident_reporter import report_incident
-
+from src.datahub_client import get_downstream_entities, make_urn
+from src.incident_reporter import report_incident
 
 def get_entity_name(entity_urn: str) -> str:
     """Извлекает короткое имя сущности из DataHub URN."""
