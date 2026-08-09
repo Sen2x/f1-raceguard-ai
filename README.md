@@ -18,24 +18,31 @@ The high-level flow is:
 
 ```text
 Primary Telemetry ──┐
-                    ├──> Validation
+                    ├──> Telemetry Validation
 Backup Telemetry ───┘
                          │
                          ▼
-                  Source Selection
+                  Fallback Manager
                          │
-              ┌──────────┼──────────┐
-              ▼          ▼          ▼
-           PRIMARY     BACKUP     BLOCKED
+                         ▼
+              PRIMARY / BACKUP / BLOCKED
                          │
                          ▼
                  RaceGuard Service
                          │
-                         ▼
-              DataHub Impact Analysis
-                         │
-                         ▼
-                 Incident Handling
+              ┌──────────┴──────────┐
+              │                     │
+              ▼                     ▼
+        PRIMARY decision       BACKUP / BLOCKED
+              │                     │
+              │                     ▼
+              │            DataHub Impact Analysis
+              │                     │
+              │                     ▼
+              │              Incident Handling
+              │
+              ▼
+        Continue normally
 ```
 
 ## Main Components
