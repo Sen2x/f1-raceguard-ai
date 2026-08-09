@@ -45,6 +45,62 @@ Backup Telemetry ───┘
         Continue normally
 ```
 
+---
+
+## Team
+
+LunarSafe AI was developed collaboratively for the hackathon.
+
+### Sen2x
+
+**Computer Vision / Backend**
+
+- hazard-detection pipeline;
+- OpenCV terrain analysis;
+- landing-zone selection;
+- distance-transform analysis;
+- candidate scoring;
+- resolution normalization;
+- FastAPI integration;
+- Render backend deployment.
+
+GitHub:
+
+```text
+https://github.com/Sen2x
+```
+
+### DaniilsLukaMiskins
+
+**Frontend / UX / Native.builder**
+
+- frontend interface;
+- UX implementation;
+- Native.builder integration.
+
+GitHub:
+
+```text
+https://github.com/DaniilsLukaMiskins
+```
+
+### RizskajaVecna
+
+**Testing / Documentation / Demo Features**
+
+- testing;
+- documentation support;
+- demo support;
+- comparison functionality;
+- Download Analysis JSON functionality.
+
+GitHub:
+
+```text
+https://github.com/RizskajaVecna
+```
+---
+
 ## Main Components
 
 ### 1. Telemetry Validation
