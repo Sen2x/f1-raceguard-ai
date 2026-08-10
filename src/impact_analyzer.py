@@ -2,6 +2,8 @@ from typing import Any
 
 from src.datahub_client import get_downstream_entities, make_urn
 from src.incident_reporter import report_incident
+from src.mcp_datahub_client import get_downstream_entities_sync
+
 
 def get_entity_name(entity_urn: str) -> str:
     """Извлекает короткое имя сущности из DataHub URN."""
@@ -11,15 +13,29 @@ def get_entity_name(entity_urn: str) -> str:
         raise ValueError(f"Invalid DataHub URN: {entity_urn}") from error
 
 
+def _resolve_downstream_urns(source_urn: str) -> tuple[list[str], str]:
+    """Resolves downstream lineage via the DataHub MCP agent.
+
+    Falls back to the direct GraphQL client if the MCP Server is
+    unreachable (e.g. not deployed in this environment), so impact
+    analysis keeps working without it.
+    """
+    try:
+        return get_downstream_entities_sync(source_urn), "datahub-mcp-server"
+    except Exception as exc:
+        print(f"DataHub MCP agent unavailable, falling back to direct GraphQL: {exc}")
+        return get_downstream_entities(source_urn), "graphql"
+
+
 def analyze_impact(
     source_entity: str,
     problem_title: str,
     problem_description: str,
 ) -> dict[str, Any]:
-    """Находит затронутые компоненты и регистрирует инцидент."""
+    """Находит затронутые компоненты через DataHub MCP-агент и регистрирует инцидент."""
 
     source_urn = make_urn(source_entity)
-    downstream_urns = get_downstream_entities(source_urn)
+    downstream_urns, impact_source = _resolve_downstream_urns(source_urn)
 
     affected_entities = [
         get_entity_name(entity_urn)
@@ -50,6 +66,7 @@ def analyze_impact(
         "affected_entities": affected_entities,
         "affected_urns": downstream_urns,
         "affected_count": len(affected_entities),
+        "impact_source": impact_source,
     }
 
 
