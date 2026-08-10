@@ -71,7 +71,7 @@ DataHub Incident created automatically
 
 ### Video
 
-Demo video: **[add video link here]**
+Demo video: **[https://youtu.be/F8BEN-nhEmY?si=uf6Ae9JPWEHs1BIJ]**
 
 ### Evidence
 
