@@ -1,11 +1,26 @@
 from fastapi import FastAPI
 
 from app.schemas import TelemetryRequest, TelemetryResponse
+from src.telemetry_validator import validate_telemetry
+from src.fallback_manager import choose_source
+from src.incident_reporter import report_incident
+
 
 app = FastAPI(
     title="F1 RaceGuard AI",
     version="1.0.0",
 )
+
+
+REQUIRED_FIELDS = [
+    "tyre_temperature",
+    "tyre_pressure",
+]
+
+FIELD_TYPES = {
+    "tyre_temperature": float,
+    "tyre_pressure": float,
+}
 
 
 @app.get("/health")
@@ -15,52 +30,77 @@ def health():
 
 @app.post("/telemetry/evaluate", response_model=TelemetryResponse)
 def evaluate_telemetry(data: TelemetryRequest):
-    """
-    Temporary API integration layer.
-
-    Luka's fallback_manager will replace this temporary
-    validation logic when his module is merged.
-    """
-
     primary = data.primary
     backup = data.backup
 
-    reasons = []
-
-    primary_valid = (
-        primary.get("tyre_temperature") is not None
-        and isinstance(primary.get("tyre_temperature"), (int, float))
-        and primary.get("tyre_pressure") is not None
-        and isinstance(primary.get("tyre_pressure"), (int, float))
+    primary_result = validate_telemetry(
+        telemetry=primary,
+        required_fields=REQUIRED_FIELDS,
+        field_types=FIELD_TYPES,
     )
 
-    if primary_valid:
-        return TelemetryResponse(
-            selected_source="PRIMARY",
-            status="OK",
-            reasons=[],
-        )
-
-    reasons.append("Primary telemetry is invalid")
-
-    backup_valid = (
-        backup.get("tyre_temperature") is not None
-        and isinstance(backup.get("tyre_temperature"), (int, float))
-        and backup.get("tyre_pressure") is not None
-        and isinstance(backup.get("tyre_pressure"), (int, float))
+    backup_result = validate_telemetry(
+        telemetry=backup,
+        required_fields=REQUIRED_FIELDS,
+        field_types=FIELD_TYPES,
     )
 
-    if backup_valid:
-        return TelemetryResponse(
-            selected_source="BACKUP",
-            status="DEGRADED",
-            reasons=reasons,
-        )
+    fallback_result = choose_source(
+        primary_result=primary_result,
+        backup_result=backup_result,
+    )
 
-    reasons.append("Backup telemetry is invalid")
+    selected_source = fallback_result.selected_source
+
+    if selected_source == "PRIMARY":
+        status = "OK"
+
+    elif selected_source == "BACKUP":
+        status = "DEGRADED"
+
+        try:
+            report_incident(
+                {
+                    "resource_urn": (
+                        "urn:li:dataset:"
+                        "(urn:li:dataPlatform:raceguard,"
+                        "primary_tyre_sensor,PROD)"
+                    ),
+                    "title": "Primary tyre sensor telemetry failure",
+                    "description": (
+                        "Primary telemetry failed validation. "
+                        "RaceGuard switched to backup telemetry."
+                    ),
+                    "custom_type": "RaceGuard telemetry fallback",
+                }
+            )
+        except Exception as exc:
+            print(f"DataHub incident reporting failed: {exc}")
+
+    else:
+        status = "BLOCKED"
+
+        try:
+            report_incident(
+                {
+                    "resource_urn": (
+                        "urn:li:dataset:"
+                        "(urn:li:dataPlatform:raceguard,"
+                        "primary_tyre_sensor,PROD)"
+                    ),
+                    "title": "Telemetry unavailable",
+                    "description": (
+                        "Primary and backup telemetry failed validation. "
+                        "Race strategy output was blocked."
+                    ),
+                    "custom_type": "RaceGuard telemetry blocked",
+                }
+            )
+        except Exception as exc:
+            print(f"DataHub incident reporting failed: {exc}")
 
     return TelemetryResponse(
-        selected_source="BLOCKED",
-        status="BLOCKED",
-        reasons=reasons,
+        selected_source=selected_source,
+        status=status,
+        reasons=fallback_result.reasons,
     )
