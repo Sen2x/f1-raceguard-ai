@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from app.schemas import TelemetryRequest, TelemetryResponse
 from src.telemetry_validator import validate_telemetry
 from src.fallback_manager import choose_source
-from src.incident_reporter import report_incident
+from src.impact_analyzer import analyze_impact
 
 
 app = FastAPI(
@@ -22,6 +22,30 @@ FIELD_TYPES = {
     "tyre_pressure": float,
 }
 
+PRIMARY_SENSOR_ENTITY = "primary_tyre_sensor"
+
+STATUS_BY_SOURCE = {
+    "PRIMARY": "OK",
+    "BACKUP": "DEGRADED",
+    "BLOCKED": "BLOCKED",
+}
+
+INCIDENT_TITLES = {
+    "BACKUP": "Primary tyre sensor telemetry failure",
+    "BLOCKED": "Telemetry unavailable",
+}
+
+INCIDENT_DESCRIPTIONS = {
+    "BACKUP": (
+        "Primary telemetry failed validation. "
+        "RaceGuard switched to backup telemetry."
+    ),
+    "BLOCKED": (
+        "Primary and backup telemetry failed validation. "
+        "Race strategy output was blocked."
+    ),
+}
+
 
 @app.get("/health")
 def health():
@@ -30,17 +54,14 @@ def health():
 
 @app.post("/telemetry/evaluate", response_model=TelemetryResponse)
 def evaluate_telemetry(data: TelemetryRequest):
-    primary = data.primary
-    backup = data.backup
-
     primary_result = validate_telemetry(
-        telemetry=primary,
+        telemetry=data.primary,
         required_fields=REQUIRED_FIELDS,
         field_types=FIELD_TYPES,
     )
 
     backup_result = validate_telemetry(
-        telemetry=backup,
+        telemetry=data.backup,
         required_fields=REQUIRED_FIELDS,
         field_types=FIELD_TYPES,
     )
@@ -51,53 +72,17 @@ def evaluate_telemetry(data: TelemetryRequest):
     )
 
     selected_source = fallback_result.selected_source
+    status = STATUS_BY_SOURCE[selected_source]
 
-    if selected_source == "PRIMARY":
-        status = "OK"
-
-    elif selected_source == "BACKUP":
-        status = "DEGRADED"
-
+    if selected_source != "PRIMARY":
         try:
-            report_incident(
-                {
-                    "resource_urn": (
-                        "urn:li:dataset:"
-                        "(urn:li:dataPlatform:raceguard,"
-                        "primary_tyre_sensor,PROD)"
-                    ),
-                    "title": "Primary tyre sensor telemetry failure",
-                    "description": (
-                        "Primary telemetry failed validation. "
-                        "RaceGuard switched to backup telemetry."
-                    ),
-                    "custom_type": "RaceGuard telemetry fallback",
-                }
+            analyze_impact(
+                source_entity=PRIMARY_SENSOR_ENTITY,
+                problem_title=INCIDENT_TITLES[selected_source],
+                problem_description=INCIDENT_DESCRIPTIONS[selected_source],
             )
         except Exception as exc:
-            print(f"DataHub incident reporting failed: {exc}")
-
-    else:
-        status = "BLOCKED"
-
-        try:
-            report_incident(
-                {
-                    "resource_urn": (
-                        "urn:li:dataset:"
-                        "(urn:li:dataPlatform:raceguard,"
-                        "primary_tyre_sensor,PROD)"
-                    ),
-                    "title": "Telemetry unavailable",
-                    "description": (
-                        "Primary and backup telemetry failed validation. "
-                        "Race strategy output was blocked."
-                    ),
-                    "custom_type": "RaceGuard telemetry blocked",
-                }
-            )
-        except Exception as exc:
-            print(f"DataHub incident reporting failed: {exc}")
+            print(f"DataHub impact analysis failed: {exc}")
 
     return TelemetryResponse(
         selected_source=selected_source,

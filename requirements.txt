@@ -1,2 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
 requests
+acryl-datahub
+mcp
+mcp-server-datahub
 pytest

@@ -4,15 +4,7 @@ F1 RaceGuard AI is a safety layer designed to protect a race strategy system fro
 
 The system validates incoming telemetry before it reaches downstream strategy components. If the primary telemetry source is unreliable, the system can safely switch to a backup source. If neither source is reliable, the telemetry is blocked.
 
-DataHub is used to represent data lineage, analyze downstream impact, and support incident reporting.
-
-## Project Goal
-
-A race strategy system depends on telemetry data.
-
-If a sensor sends invalid or outdated data, using it without validation may cause downstream components to operate on unreliable information.
-
-F1 RaceGuard AI adds a protection layer between telemetry sources and the rest of the system.
+DataHub is used to represent data lineage, analyze downstream impact, and support incident reporting. Impact analysis is performed through the official **DataHub MCP Server**, so the impact check is a real agentic tool call rather than a hardcoded GraphQL query (see [DataHub Integration](#3-datahub-integration) below).
 
 The high-level flow is:
 
@@ -36,7 +28,9 @@ Backup Telemetry ───┘
         PRIMARY decision       BACKUP / BLOCKED
               │                     │
               │                     ▼
-              │            DataHub Impact Analysis
+              │         DataHub Impact Analysis
+              │         (DataHub MCP Server agent,
+              │          GraphQL fallback)
               │                     │
               │                     ▼
               │              Incident Handling
@@ -49,10 +43,9 @@ Backup Telemetry ───┘
 
 ## Team
 
-LunarSafe AI was developed collaboratively for the hackathon.
+F1 RaceGuard AI was developed collaboratively for the hackathon.
 
 ### Sen2x
-
 
 GitHub:
 
@@ -62,7 +55,6 @@ https://github.com/Sen2x
 
 ### DaniilsLukaMiskins
 
-
 GitHub:
 
 ```text
@@ -71,12 +63,12 @@ https://github.com/DaniilsLukaMiskins
 
 ### RizskajaVecna
 
-
 GitHub:
 
 ```text
 https://github.com/RizskajaVecna
 ```
+
 ---
 
 ## Main Components
@@ -165,20 +157,12 @@ Files:
 ```text
 scripts/register_metadata.py
 src/datahub_client.py
+src/mcp_datahub_client.py
 src/impact_analyzer.py
 src/incident_reporter.py
 ```
 
-DataHub is used for metadata and lineage management.
-
-The project models the flow of telemetry through downstream components so that a failure in an upstream source can be analyzed.
-
-The DataHub part supports:
-
-- metadata registration;
-- data lineage;
-- downstream impact analysis;
-- incident reporting.
+DataHub is used for metadata and lineage management. The project models the flow of telemetry through downstream components so that a failure in an upstream source can be analyzed and reported as an incident.
 
 Conceptually, the lineage is:
 
@@ -200,27 +184,165 @@ Backup Telemetry Source ──┘
                        Strategy Output
 ```
 
+#### DataHub MCP Server (agentic component)
+
+`src/mcp_datahub_client.py` drives the official [DataHub MCP Server](https://github.com/acryldata/mcp-server-datahub) (`mcp-server-datahub`) as a Model Context Protocol tool server: it spawns the server as a subprocess over stdio, lists its published tools, and calls the `search` and `get_lineage` tools — the same interface an AI agent client (e.g. Claude Desktop) uses to explore DataHub.
+
+`analyze_impact()` in `src/impact_analyzer.py` uses this agent to resolve downstream impact:
+
+```text
+BACKUP / BLOCKED decision
+        │
+        ▼
+analyze_impact(source_entity, ...)
+        │
+        ▼
+DataHub MCP Server: get_lineage(urn, upstream=False)
+        │
+        ├── succeeds ──> downstream entities resolved via the MCP agent
+        │
+        └── unreachable ──> falls back to src/datahub_client.py
+                             (direct GraphQL query)
+        │
+        ▼
+report_incident() raises the incident in DataHub,
+including the affected downstream components
+```
+
+The result of `analyze_impact()` includes an `impact_source` field (`"datahub-mcp-server"` or `"graphql"`) so it's always visible which path produced the impact analysis.
+
+Configuration (same environment variables the DataHub CLI and other DataHub tooling use):
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `DATAHUB_GMS_URL` | DataHub GMS endpoint the MCP Server connects to | `http://localhost:8080` |
+| `DATAHUB_GMS_TOKEN` | Personal access token (if your DataHub instance requires auth) | not set |
+| `DATAHUB_MCP_COMMAND` / `DATAHUB_MCP_ARGS` | Override how the MCP Server process is launched | `python -m mcp_server_datahub` |
+| `DATAHUB_MCP_TIMEOUT_SECONDS` | Max time to wait for the MCP Server before falling back to GraphQL | `8` |
+
+You can exercise the agent directly:
+
+```bash
+python -m src.mcp_datahub_client
+```
+
+This lists the tools published by the DataHub MCP Server, resolves `primary_tyre_sensor` through the `search` tool, and prints its downstream lineage via `get_lineage`.
+
+#### Metadata, lineage and incidents
+
+- `scripts/register_metadata.py` registers the RaceGuard entities and lineage edges in DataHub (run once against a DataHub instance to seed it).
+- `src/datahub_client.py` is the direct GraphQL client, used as a fallback when the MCP Server isn't reachable.
+- `src/incident_reporter.py` raises a DataHub incident (`raiseIncident` mutation) for a given resource URN.
+- `src/impact_analyzer.py` ties the two together: resolve downstream impact (via the MCP agent, falling back to GraphQL), then report the incident with the affected components listed in its description.
+
 ### 4. RaceGuard Service
 
-The service layer is responsible for connecting the independent project components.
+File:
 
-Its intended responsibility is:
+```text
+app/main.py
+app/schemas.py
+```
+
+The service layer is the FastAPI application that orchestrates the other components. It does not duplicate telemetry validation or DataHub logic — it wires them together:
 
 ```text
 telemetry input
       ↓
-telemetry validator
+telemetry validator   (src/telemetry_validator.py)
       ↓
-fallback manager
+fallback manager       (src/fallback_manager.py)
       ↓
-RaceGuard service
+RaceGuard service       (app/main.py)
       ↓
-DataHub impact analysis
+DataHub impact analysis (src/impact_analyzer.py, MCP agent + GraphQL fallback)
       ↓
-incident handling
+incident handling       (src/incident_reporter.py)
 ```
 
-The service layer should orchestrate the existing modules rather than duplicate telemetry validation or DataHub logic.
+It exposes:
+
+- `GET /health` — liveness check.
+- `POST /telemetry/evaluate` — evaluates primary/backup telemetry and returns the RaceGuard decision.
+
+## Three Scenarios
+
+`POST /telemetry/evaluate` takes `primary` and `backup` telemetry packages and always resolves to exactly one of three scenarios.
+
+### PRIMARY — the primary sensor is healthy
+
+```bash
+curl -X POST http://localhost:8000/telemetry/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+        "primary": {"tyre_temperature": 97.2, "tyre_pressure": 22.4},
+        "backup":  {"tyre_temperature": 96.5, "tyre_pressure": 22.1}
+      }'
+```
+
+```json
+{
+  "selected_source": "PRIMARY",
+  "status": "OK",
+  "reasons": ["Primary telemetry is valid"]
+}
+```
+
+No DataHub call is made — the primary source is preferred whenever it is usable.
+
+### BACKUP — the primary sensor is faulty, backup takes over
+
+```bash
+curl -X POST http://localhost:8000/telemetry/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+        "primary": {"tyre_temperature": null, "tyre_pressure": "error"},
+        "backup":  {"tyre_temperature": 96.5, "tyre_pressure": 22.1}
+      }'
+```
+
+```json
+{
+  "selected_source": "BACKUP",
+  "status": "DEGRADED",
+  "reasons": [
+    "Primary telemetry is invalid",
+    "Field 'tyre_temperature' cannot be None",
+    "Field 'tyre_pressure' must be of type float",
+    "Backup telemetry is valid"
+  ]
+}
+```
+
+RaceGuard runs `analyze_impact()` for `primary_tyre_sensor`, resolves the affected downstream components through the DataHub MCP Server, and raises a `RaceGuard telemetry fallback` incident in DataHub.
+
+### BLOCKED — both sensors are faulty
+
+```bash
+curl -X POST http://localhost:8000/telemetry/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+        "primary": {"tyre_temperature": null, "tyre_pressure": "error"},
+        "backup":  {"tyre_temperature": null, "tyre_pressure": "error"}
+      }'
+```
+
+```json
+{
+  "selected_source": "BLOCKED",
+  "status": "BLOCKED",
+  "reasons": [
+    "Primary telemetry is invalid",
+    "Field 'tyre_temperature' cannot be None",
+    "Field 'tyre_pressure' must be of type float",
+    "Backup telemetry is invalid",
+    "Field 'tyre_temperature' cannot be None",
+    "Field 'tyre_pressure' must be of type float"
+  ]
+}
+```
+
+RaceGuard again runs `analyze_impact()` and raises a `RaceGuard telemetry blocked` incident in DataHub. If DataHub (or the MCP Server) is unreachable, the API still returns `200 OK` with the `BLOCKED` decision — telemetry safety does not depend on DataHub being available.
 
 ## Telemetry Validation
 
@@ -440,56 +562,14 @@ BLOCKED
 
 This prevents unreliable telemetry from being passed further into the system.
 
-## Example Scenario
-
-Primary telemetry:
-
-```python
-primary = {
-    "timestamp": "2026-08-08T14:32:10Z",
-    "tyre_temperature": None,
-    "tyre_pressure": "error",
-}
-```
-
-Backup telemetry:
-
-```python
-backup = {
-    "timestamp": "2026-08-08T14:32:10Z",
-    "tyre_temperature": 96.5,
-    "tyre_pressure": 22.1,
-}
-```
-
-The primary source fails validation because it contains invalid values.
-
-The backup source passes validation.
-
-Expected source decision:
-
-```text
-BACKUP
-```
-
-The fallback result can contain reasons such as:
-
-```python
-FallbackResult(
-    selected_source="BACKUP",
-    reasons=[
-        "Primary telemetry is invalid",
-        "Field 'tyre_temperature' cannot be None",
-        "Field 'tyre_pressure' must be of type float",
-        "Backup telemetry is valid",
-    ],
-)
-```
-
 ## Project Structure
 
 ```text
 f1-raceguard-ai/
+│
+├── app/
+│   ├── main.py
+│   └── schemas.py
 │
 ├── scripts/
 │   └── register_metadata.py
@@ -497,10 +577,14 @@ f1-raceguard-ai/
 ├── src/
 │   ├── __init__.py
 │   ├── datahub_client.py
+│   ├── mcp_datahub_client.py
 │   ├── impact_analyzer.py
 │   ├── incident_reporter.py
 │   ├── telemetry_validator.py
 │   └── fallback_manager.py
+│
+├── test/
+│   └── test_api.py
 │
 ├── tests/
 │   ├── test_impact_analyzer.py
@@ -514,8 +598,6 @@ f1-raceguard-ai/
 └── .gitignore
 ```
 
-Additional service-layer files may be added as integration work is completed.
-
 ## Installation
 
 Clone the repository:
@@ -525,16 +607,33 @@ git clone https://github.com/Sen2x/f1-raceguard-ai.git
 cd f1-raceguard-ai
 ```
 
-Install the project dependencies:
+Install the project dependencies (FastAPI service, DataHub client, DataHub MCP Server, and test tooling):
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-The DataHub modules also require the DataHub Python package in the local development environment:
+Run the service:
 
 ```bash
-python -m pip install acryl-datahub
+python -m uvicorn app.main:app --reload
+```
+
+The API is then available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
+
+DataHub impact analysis and incident reporting need a reachable DataHub instance. Point the DataHub MCP Server and the GraphQL fallback at it with:
+
+```bash
+export DATAHUB_GMS_URL=http://localhost:8080
+export DATAHUB_GMS_TOKEN=<your-personal-access-token>   # optional
+```
+
+Without a reachable DataHub instance, the `BACKUP` and `BLOCKED` scenarios still work — the impact analysis call fails gracefully and is logged, it does not block the API response. It will add up to `DATAHUB_MCP_TIMEOUT_SECONDS` (default 8s) of latency for the MCP attempt before falling back to GraphQL and returning; lower it (or point `DATAHUB_GMS_URL` at a real instance) for a snappier demo.
+
+To seed DataHub with the RaceGuard entities and lineage used by this project:
+
+```bash
+python scripts/register_metadata.py
 ```
 
 ## Running Tests
@@ -557,7 +656,13 @@ Run only fallback manager tests:
 python -m pytest tests/test_fallback_manager.py -v
 ```
 
-The telemetry and fallback unit tests use local test data and do not perform network requests.
+Run only the API integration tests (all three scenarios):
+
+```bash
+python -m pytest test/test_api.py -v
+```
+
+All unit and integration tests use local test data and mocks — none of them make real network calls or spawn the DataHub MCP Server, per the project's testing principles below.
 
 ## Telemetry Validator Test Coverage
 
@@ -585,6 +690,15 @@ The fallback manager is tested for all three source-selection outcomes:
 - `BACKUP`;
 - `BLOCKED`.
 
+## API Integration Test Coverage
+
+`test/test_api.py` drives the FastAPI app end-to-end (via `TestClient`) for all three scenarios, mocking `analyze_impact` so no real DataHub/MCP call is made:
+
+- `PRIMARY` — impact analysis is not triggered;
+- `BACKUP` — impact analysis is triggered with the correct incident details;
+- `BLOCKED` — impact analysis is triggered with the correct incident details;
+- DataHub being unreachable does not break the API response.
+
 ## Design Principles
 
 The project follows several important design principles:
@@ -597,6 +711,7 @@ The project follows several important design principles:
 - the primary telemetry source is preferred whenever it is valid;
 - backup telemetry is used only when the primary source is unsuitable;
 - if neither source can be trusted, telemetry is blocked;
+- DataHub impact analysis prefers the MCP Server agent and degrades to direct GraphQL, but a DataHub outage never blocks the API response;
 - unit tests should not rely on real external services;
 - the project does not introduce a new machine-learning model.
 
@@ -610,7 +725,7 @@ Responsible for:
 
 - metadata registration;
 - lineage;
-- downstream impact analysis;
+- downstream impact analysis via the DataHub MCP Server (with GraphQL fallback);
 - incident reporting.
 
 Main files:
@@ -618,6 +733,7 @@ Main files:
 ```text
 scripts/register_metadata.py
 src/datahub_client.py
+src/mcp_datahub_client.py
 src/impact_analyzer.py
 src/incident_reporter.py
 ```
@@ -652,6 +768,14 @@ Responsible for:
 - connecting failure decisions to DataHub impact analysis;
 - keeping integration logic separate from validation rules.
 
+Main files:
+
+```text
+app/main.py
+app/schemas.py
+test/test_api.py
+```
+
 ## Development Workflow
 
 Feature development is performed in separate Git branches.
@@ -661,7 +785,8 @@ Examples:
 ```text
 feature/datahub
 feature/telemetry-validation
-feature/raceguard-service
+feature/api
+feature/integration
 ```
 
 Changes should be reviewed through Pull Requests before being merged into `main`.
@@ -686,4 +811,4 @@ The project does not:
 
 ## License
 
-See the `LICENSE` file for licensing information.
+F1 RaceGuard AI is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for the full text.
