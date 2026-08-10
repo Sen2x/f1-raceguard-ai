@@ -40,6 +40,47 @@ Backup Telemetry ───┘
 ```
 
 ---
+## Demo
+
+F1 RaceGuard AI demonstrates three safety decisions:
+
+1. `PRIMARY` — healthy primary telemetry is accepted.
+2. `BACKUP` — invalid primary telemetry triggers automatic fallback.
+3. `BLOCKED` — the strategy input is blocked when both sources are invalid.
+
+For `BACKUP` and `BLOCKED`, RaceGuard automatically:
+
+- queries downstream lineage through the DataHub MCP Server;
+- identifies affected data components;
+- creates an active Incident in DataHub;
+- preserves the telemetry decision even if DataHub is unavailable.
+
+### Demonstrated failure flow
+
+```text
+Invalid primary telemetry
+        ↓
+BACKUP selected
+        ↓
+DataHub MCP lineage analysis
+        ↓
+Affected component: raw_telemetry
+        ↓
+DataHub Incident created automatically
+```
+
+### Video
+
+Demo video: **[add video link here]**
+
+### Evidence
+
+- FastAPI response with `BACKUP / DEGRADED`;
+- automatic DataHub Incident creation;
+- Incident linked to `primary_tyre_sensor`;
+- affected downstream component `raw_telemetry`.
+
+---
 
 ## Team
 
@@ -314,7 +355,7 @@ curl -X POST http://localhost:8000/telemetry/evaluate \
 }
 ```
 
-RaceGuard runs `analyze_impact()` for `primary_tyre_sensor`, resolves the affected downstream components through the DataHub MCP Server, and raises a `RaceGuard telemetry fallback` incident in DataHub.
+RaceGuard runs `analyze_impact()` for `primary_tyre_sensor`, resolves the affected downstream components through the DataHub MCP Server, and raises a `Primary tyre sensor telemetry failure` incident in DataHub.
 
 ### BLOCKED — both sensors are faulty
 
@@ -342,7 +383,7 @@ curl -X POST http://localhost:8000/telemetry/evaluate \
 }
 ```
 
-RaceGuard again runs `analyze_impact()` and raises a `RaceGuard telemetry blocked` incident in DataHub. If DataHub (or the MCP Server) is unreachable, the API still returns `200 OK` with the `BLOCKED` decision — telemetry safety does not depend on DataHub being available.
+RaceGuard again runs `analyze_impact()` and raises a `Telemetry unavailable` incident in DataHub. If DataHub (or the MCP Server) is unreachable, the API still returns `200 OK` with the `BLOCKED` decision — telemetry safety does not depend on DataHub being available.
 
 ## Telemetry Validation
 
